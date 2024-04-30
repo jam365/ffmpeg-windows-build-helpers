@@ -347,11 +347,9 @@ install_cross_compiler() {
     local zeranoe_script_options="--gcc-ver=10.2.0 --mingw-w64-ver=9.0.0 --default-configure --cpu-count=$gcc_cpu_count --disable-shared --clean-build --verbose --allow-overwrite --threads=winpthreads" # allow-overwrite to avoid some crufty prompts if I do rebuilds [or maybe should just nuke everything...]
     if [[ ($compiler_flavors == "win32" || $compiler_flavors == "multi") && ! -f ../$win32_gcc ]]; then
       echo "Building win32 cross compiler..."
-      download_gcc_build_script $zeranoe_script_name
-      if [[ `uname` =~ "5.1" ]]; then # Avoid using secure API functions for compatibility with msvcrt.dll on Windows XP.
-        sed -i "s/ --enable-secure-api//" $zeranoe_script_name
-      fi
-      CFLAGS=-O2 CXXFLAGS=-O2 nice ./$zeranoe_script_name $zeranoe_script_options --build-type=win32 || exit 1
+      # using a different script to build mingw with gcc v13.2.0
+      do_git_checkout https://github.com/bradleysepos/mingw-w64-build.git mingw-w64-build
+      nice ./mingw-w64-build/mingw-w64-build i686 ./ || exit 1
       if [[ ! -f ../$win32_gcc ]]; then
         echo "Failure building 32 bit gcc? Recommend nuke sandbox (rm -rf sandbox) and start over..."
         exit 1
@@ -363,8 +361,9 @@ install_cross_compiler() {
     fi
     if [[ ($compiler_flavors == "win64" || $compiler_flavors == "multi") && ! -f ../$win64_gcc ]]; then
       echo "Building win64 x86_64 cross compiler..."
-      download_gcc_build_script $zeranoe_script_name
-      CFLAGS=-O2 CXXFLAGS=-O2 nice ./$zeranoe_script_name $zeranoe_script_options --build-type=win64 || exit 1
+      # using a different script to build mingw with gcc v13.2.0
+      do_git_checkout https://github.com/bradleysepos/mingw-w64-build.git mingw-w64-build
+      nice ./mingw-w64-build/mingw-w64-build --disable-gdb x86_64 ./ || exit 1
       if [[ ! -f ../$win64_gcc ]]; then
         echo "Failure building 64 bit gcc? Recommend nuke sandbox (rm -rf sandbox) and start over..."
         exit 1
@@ -374,6 +373,13 @@ install_cross_compiler() {
 	      exit 1
       fi
     fi
+
+    # delete mingw-w64-build folder & sources
+    echo "deleting mingw-w64 build & source folders"
+    rm -fr mingw-w64-build
+    rm -fr pkg
+    rm -fr build-mingw-w64-x86_64.noindex
+    rm -fr source.noindex
 
     # rm -f build.log # leave resultant build log...sometimes useful...
     reset_cflags
@@ -781,16 +787,16 @@ build_bzip2() {
 }
 
 build_liblzma() {
-  download_and_unpack_file https://sourceforge.net/projects/lzmautils/files/xz-5.2.5.tar.xz
-  cd xz-5.2.5
+  download_and_unpack_file https://sourceforge.net/projects/lzmautils/files/xz-5.4.6.tar.xz
+  cd xz-5.4.6
     generic_configure "--disable-xz --disable-xzdec --disable-lzmadec --disable-lzmainfo --disable-scripts --disable-doc --disable-nls"
     do_make_and_make_install
   cd ..
 }
 
 build_zlib() {
-  download_and_unpack_file https://github.com/madler/zlib/archive/v1.2.11.tar.gz zlib-1.2.11
-  cd zlib-1.2.11
+  download_and_unpack_file https://github.com/madler/zlib/archive/v1.3.1.tar.gz zlib-1.3.1
+  cd zlib-1.3.1
     local make_options
     if [[ $compiler_flavors == "native" ]]; then
       export CFLAGS="$CFLAGS -fPIC" # For some reason glib needs this even though we build a static library
@@ -950,11 +956,11 @@ build_lensfun() {
 build_libtesseract() {
   build_libtiff # no disable configure option for this in tesseract? odd...
   build_libleptonica
-  do_git_checkout https://github.com/tesseract-ocr/tesseract.git tesseract_git 4.1.1
+  do_git_checkout https://github.com/tesseract-ocr/tesseract.git tesseract_git 5.3.4
   cd tesseract_git
     sed -i.bak 's/libcurl/libbcurl_disabled/g' configure.ac # --disable-curl hard disable, sometimes it's here but they link it wrong so punt...
     if [[ $compiler_flavors != "native"  ]]; then
-      apply_patch file://$patch_dir/tesseract-4.1.1_mingw-std-threads.patch
+      #apply_patch file://$patch_dir/tesseract-4.1.1_mingw-std-threads.patch
       generic_configure "--disable-openmp"
       do_make_and_make_install
       sed -i.bak 's/-ltesseract.*$/-ltesseract -lstdc++ -lws2_32 -llept -ltiff -llzma -ljpeg -lz/' $PKG_CONFIG_PATH/tesseract.pc # why does it needs winsock? LOL plus all of libtiff's <sigh>
@@ -1718,8 +1724,8 @@ build_fribidi() {
 
 build_libsrt() {
   # do_git_checkout https://github.com/Haivision/srt.git # might be able to use these days...?
-  download_and_unpack_file https://github.com/Haivision/srt/archive/v1.4.1.tar.gz srt-1.4.1
-  cd srt-1.4.1
+  download_and_unpack_file https://github.com/Haivision/srt/archive/v1.4.4.tar.gz srt-1.4.4
+  cd srt-1.4.4
     if [[ $compiler_flavors != "native" ]]; then
       apply_patch file://$patch_dir/srt.app.patch -p1
     fi
