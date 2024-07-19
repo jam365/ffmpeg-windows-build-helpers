@@ -411,6 +411,27 @@ do_svn_checkout() {
   fi
 }
 
+# params: git url, to_dir
+retry_git_or_die() {  # originally from https://stackoverflow.com/a/76012343/32453
+  local RETRIES_NO=50
+  local RETRY_DELAY=3
+  local repo_url=$1
+  local to_dir=$2
+
+  for i in $(seq 1 $RETRIES_NO); do
+   echo "Downloading (via git clone) $to_dir from $repo_url"
+   rm -rf $to_dir.tmp # just in case it was interrupted previously...not sure if necessary...
+   git clone $repo_url $to_dir.tmp --recurse-submodules && break
+   # get here -> failure
+   [[ $i -eq $RETRIES_NO ]] && echo "Failed to execute git cmd $repo_url $to_dir after $RETRIES_NO retries" && exit 1
+   echo "sleeping before retry git"
+   sleep ${RETRY_DELAY}
+  done
+  # prevent partial checkout confusion by renaming it only after success
+  mv $to_dir.tmp $to_dir
+  echo "done git cloning to $to_dir"
+}
+
 do_git_checkout() {
   local repo_url="$1"
   local to_dir="$2"
@@ -419,12 +440,7 @@ do_git_checkout() {
   fi
   local desired_branch="$3"
   if [ ! -d $to_dir ]; then
-    echo "Downloading (via git clone) $to_dir from $repo_url"
-    rm -rf $to_dir.tmp # just in case it was interrupted previously...
-    git clone $repo_url $to_dir.tmp --recurse-submodules || exit 1
-    # prevent partial checkouts by renaming it only after success
-    mv $to_dir.tmp $to_dir
-    echo "done git cloning to $to_dir"
+    retry_git_or_die $repo_url $to_dir
     cd $to_dir
   else
     cd $to_dir
@@ -503,6 +519,7 @@ do_configure() {
       autoreconf -fiv # a handful of them require this to create ./configure :|
     fi
     rm -f already_* # reset
+    chmod u+x "$configure_name" # In non-windows environments, with devcontainers, the configuration file doesn't have execution permissions
     nice -n 5 "$configure_name" $configure_options || { echo "failed configure $english_name"; exit 1;} # less nicey than make (since single thread, and what if you're running another ffmpeg nice build elsewhere?)
     touch -- "$touch_name"
     echo "doing preventative make clean"
@@ -1024,7 +1041,7 @@ build_libwebp() {
 
 build_harfbuzz() {
   local new_build=false
-  do_git_checkout https://github.com/harfbuzz/harfbuzz.git harfbuzz_git "origin/main"
+  do_git_checkout https://github.com/harfbuzz/harfbuzz.git harfbuzz_git "tags/8.5.0" # keep old autogen build :)
   if [ ! -f harfbuzz_git/already_done_harf ]; then # Not done or new master, so build
     new_build=true
   fi
@@ -1515,6 +1532,7 @@ build_libbluray() {
 build_libbs2b() {
   download_and_unpack_file https://downloads.sourceforge.net/project/bs2b/libbs2b/3.1.0/libbs2b-3.1.0.tar.gz
   cd libbs2b-3.1.0
+    apply_patch file://$patch_dir/libbs2b.patch
     sed -i.bak "s/AC_FUNC_MALLOC//" configure.ac # #270
     export LIBS=-lm # avoid pow failure linux native
     generic_configure_make_install
@@ -1708,6 +1726,7 @@ build_zvbi() {
       apply_patch file://$patch_dir/zvbi-win32.patch
     fi
     apply_patch file://$patch_dir/zvbi-no-contrib.diff # weird issues with some stuff in contrib...
+    apply_patch file://$patch_dir/zvbi-aarch64.patch
     generic_configure " --disable-dvb --disable-bktr --disable-proxy --disable-nls --without-doxygen --without-libiconv-prefix"
     # Without '--without-libiconv-prefix' 'configure' would otherwise search for and only accept a shared Libiconv library.
     do_make_and_make_install
@@ -2775,7 +2794,6 @@ if [ -z "$cpu_count" ]; then
     cpu_count=1 # else default to just 1, instead of blank, which means infinite
   fi
 fi
-original_cpu_count=$cpu_count # save it away for some that revert it temporarily
 
 set_box_memory_size_bytes
 if [[ $box_memory_size_bytes -lt 600000000 ]]; then
@@ -2841,7 +2859,8 @@ while true; do
       --ffmpeg-source-dir=[default empty] specifiy the directory of ffmpeg source code. When specified, git will not be used.
       --x265-git-checkout-version=[master] if you want to build a particular version of x265, ex: --x265-git-checkout-version=Release_3.2 or a specific git hash
       --fdk-aac-git-checkout-version= if you want to build a particular version of fdk-aac, ex: --fdk-aac-git-checkout-version=v2.0.1 or another tag
-      --gcc-cpu-count=[number of cpu cores set it higher than 1 if you have multiple cores and > 1GB RAM, this speeds up initial cross compiler build. FFmpeg build uses number of cores no matter what]
+      --gcc-cpu-count=[cpu_cores_on_box if RAM > 1GB else 1] number of cpu cores this speeds up initial cross compiler build.
+      --build-cpu-count=[cpu_cores_on_box] set to lower than your cpu cores if the background processes eating all your cpu bugs your desktop usage
       --disable-nonfree=y (set to n to include nonfree like libfdk-aac,decklink)
       --build-intel-qsv=y (set to y to include the [non windows xp compat.] qsv library and ffmpeg module. NB this not not hevc_qsv...
       --sandbox-ok=n [skip sandbox prompt if y]
@@ -2867,6 +2886,7 @@ while true; do
        "; exit 0 ;;
     --sandbox-ok=* ) sandbox_ok="${1#*=}"; shift ;;
     --gcc-cpu-count=* ) gcc_cpu_count="${1#*=}"; shift ;;
+    --build-cpu-count=* ) cpu_count="${1#*=}"; shift ;;
     --ffmpeg-git-checkout-version=* ) ffmpeg_git_checkout_version="${1#*=}"; shift ;;
     --ffmpeg-git-checkout=* ) ffmpeg_git_checkout="${1#*=}"; shift ;;
     --ffmpeg-source-dir=* ) ffmpeg_source_dir="${1#*=}"; shift ;;
@@ -2912,6 +2932,7 @@ while true; do
   esac
 done
 
+original_cpu_count=$cpu_count # save it away for some that revert it temporarily
 reset_cflags # also overrides any "native" CFLAGS, which we may need if there are some 'linux only' settings in there
 reset_cppflags # Ensure CPPFLAGS are cleared and set to what is configured
 check_missing_packages # do this first since it's annoying to go through prompts then be rejected
